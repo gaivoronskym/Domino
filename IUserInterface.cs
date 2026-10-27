@@ -2,6 +2,9 @@
 {
     public interface IUserInterface
     {
+        // Новый ход: очистить экран, показать доску и чей ход
+        void BeginTurn(string playerName, IBoard board);
+
         void Print(IMessage message);
 
         void PrintTile(ITile tile);
@@ -35,23 +38,77 @@
 
     public sealed class Error(string text) : MessageEnvelope(text, ConsoleColor.Red);
 
+    // Косточка так, как она лежит на столе: левая и правая половинки
+    public readonly record struct TileFace(int Left, int Right);
+
+    public static class BoardLayout
+    {
+        // Цепочка слева направо, каждая косточка повёрнута так, чтобы соседние половинки совпадали
+        public static IReadOnlyList<TileFace> Chain(IReadOnlyList<ITile> tiles)
+        {
+            var result = new List<TileFace>(tiles.Count);
+            if (tiles.Count == 0)
+            {
+                return result;
+            }
+
+            // У крайней левой косточки наружу смотрит свободная (не приложенная) половинка
+            var first = tiles[0];
+            var face = first.Top.Applied && !first.Bottom.Applied
+                ? new TileFace(first.Bottom.Value, first.Top.Value)
+                : new TileFace(first.Top.Value, first.Bottom.Value);
+            result.Add(face);
+
+            for (var i = 1; i < tiles.Count; i++)
+            {
+                var tile = tiles[i];
+                face = tile.Top.Value == face.Right
+                    ? new TileFace(tile.Top.Value, tile.Bottom.Value)
+                    : new TileFace(tile.Bottom.Value, tile.Top.Value);
+                result.Add(face);
+            }
+
+            return result;
+        }
+    }
+
     public sealed class ConsoleInterface : IUserInterface
     {
-        private const int TileWidth = 10;
+        private const int TileWidth = 10;       // "┌───┬───┐" + пробел
+        private const int ShortTileWidth = 5;   // "[2|5]"
+
+        private IBoard? _board;
+        private string _header = "";
+        private readonly List<IMessage> _messages = [];
+        private int _lastHeight;                // сколько строк занял прошлый кадр
+
+        public void BeginTurn(string playerName, IBoard board)
+        {
+            _board = board;
+            _header = $"Ход игрока {playerName}";
+            _messages.Clear();
+
+            Console.Clear();
+            _lastHeight = 0;
+            Render();
+        }
 
         public void Print(IMessage message)
         {
-            Console.ForegroundColor = message.Color;
-            Console.WriteLine(message.Text);
-            Console.ResetColor();
+            _messages.Add(message);
+            Render();
+        }
+
+        public void PrintTile(ITile tile)
+        {
+            _messages.Add(new Info($"Из кучи: [{tile.Top.Value}|{tile.Bottom.Value}]"));
+            Render();
         }
 
         public ITile SelectTile(IReadOnlyList<ITile> tiles, bool hidden = false)
         {
             var index = 0;
-            Console.CursorVisible = false;
-
-            var height = Draw(tiles, index, hidden);
+            Render(tiles, index, hidden);
 
             while (true)
             {
@@ -64,80 +121,22 @@
                         index = (index + 1) % tiles.Count;
                         break;
                     case ConsoleKey.Enter:
-                        Console.CursorVisible = true;
                         return tiles[index];
                     default:
                         continue;   // другие клавиши: не перерисовываем
                 }
 
-                // Возвращаемся к началу блока относительно текущего курсора, а не сохранённого номера строки
-                Console.SetCursorPosition(0, Console.CursorTop - height);
-                height = Draw(tiles, index, hidden);
+                Render(tiles, index, hidden);
             }
         }
-
-        public void PrintTile(ITile tile)
-        {
-            Draw([tile], 0, false);
-        }
-
-        private static int Draw(IReadOnlyList<ITile> tiles, int selected, bool hidden)
-        {
-            Func<ITile, int, string> tileLine = hidden ? HiddenTileLine : TileLine;
-
-            // -1, чтобы строка не доходила до правого края и консоль не переносила её сама
-            var perRow = Math.Max(1, (Console.WindowWidth - 1) / TileWidth);
-            var lines = 0;
-
-            for (var start = 0; start < tiles.Count; start += perRow)
-            {
-                var end = Math.Min(start + perRow, tiles.Count);
-
-                for (var line = 0; line < 3; line++)
-                {
-                    for (var i = start; i < end; i++)
-                    {
-                        if (i == selected)
-                        {
-                            Console.BackgroundColor = ConsoleColor.Yellow;
-                            Console.ForegroundColor = ConsoleColor.Black;
-                        }
-
-                        Console.Write(tileLine(tiles[i], line));
-                        Console.ResetColor();
-                        Console.Write(' ');
-                    }
-                    Console.WriteLine();
-                    lines++;
-                }
-
-                // Маркер только в ряду с выбранной костью; в остальных рядах строка из пробелов стирает старую ▲
-                var marker = selected >= start && selected < end
-                    ? new string(' ', (selected - start) * TileWidth) + "    ▲"
-                    : "";
-                Console.WriteLine(marker.PadRight(perRow * TileWidth));
-                lines++;
-            }
-
-            return lines;
-        }
-
-        private static string TileLine(ITile tile, int line) => line switch
-        {
-            0 => "┌───┬───┐",
-            1 => $"│ {tile.Top.Value} │ {tile.Bottom.Value} │",
-            _ => "└───┴───┘",
-        };
-
-        private static string HiddenTileLine(ITile tile, int line) => line switch
-        {
-            0 => "┌───┬───┐",
-            1 => $"│ ? │ ? │",
-            _ => "└───┴───┘",
-        };
 
         public void PrintTable(Table table)
         {
+            Console.Clear();
+            _lastHeight = 0;
+            WriteBoard();
+            WriteLine("");
+
             var widths = table.Headers
                 .Select((header, col) => table.Rows
                     .Select(r => r.Cells[col].Length)
@@ -145,7 +144,6 @@
                     .Max())
                 .ToArray();
 
-            Console.WriteLine();
             Console.WriteLine(table.Title);
             Console.WriteLine(Border('┌', '┬', '┐'));
             Console.WriteLine(Line(table.Headers));
@@ -173,6 +171,127 @@
             static string Align(string cell, int width) =>
                 int.TryParse(cell, out _) ? cell.PadLeft(width) : cell.PadRight(width);
         }
+
+        // Весь экран целиком, с позиции (0,0): доска, заголовок, сообщения, селектор
+        private void Render(IReadOnlyList<ITile>? hand = null, int selected = -1, bool hidden = false)
+        {
+            Console.CursorVisible = false;
+            Console.SetCursorPosition(0, 0);
+
+            var lines = WriteBoard();
+            lines += WriteLine("");
+            lines += WriteLine(_header, ConsoleColor.Cyan);
+
+            foreach (var message in _messages)
+            {
+                lines += WriteLine(message.Text, message.Color);
+            }
+
+            if (hand is not null)
+            {
+                lines += Draw(hand, selected, hidden);
+            }
+
+            for (var i = lines; i < _lastHeight; i++)
+            {
+                WriteLine("");
+            }
+
+            _lastHeight = lines;
+            Console.CursorVisible = true;
+        }
+
+        private int WriteBoard()
+        {
+            IReadOnlyList<TileFace> chain = _board is null ? [] : BoardLayout.Chain(_board.Tiles);
+            var lines = WriteLine("Доска:");
+
+            if (chain.Count == 0)
+            {
+                return lines + WriteLine("(пусто)", ConsoleColor.DarkGray);
+            }
+
+            var perRow = Math.Max(1, (Console.WindowWidth - 1) / ShortTileWidth);
+            for (var start = 0; start < chain.Count; start += perRow)
+            {
+                var row = string.Concat(chain
+                    .Skip(start)
+                    .Take(perRow)
+                    .Select(f => $"[{f.Left}|{f.Right}]"));
+
+                lines += WriteLine(row);
+            }
+
+            return lines;
+        }
+
+        // Строка, дополненная пробелами до ширины окна: затирает то, что было на этом месте в прошлом кадре
+        private static int WriteLine(string text, ConsoleColor color = ConsoleColor.Gray)
+        {
+            Console.ForegroundColor = color;
+            Console.WriteLine(text.PadRight(Console.WindowWidth - 1));
+            Console.ResetColor();
+            return 1;
+        }
+
+        // Ряды косточек с рамкой; возвращает число напечатанных строк
+        private static int Draw(IReadOnlyList<ITile> tiles, int selected, bool hidden)
+        {
+            Func<ITile, int, string> tileLine = hidden ? HiddenTileLine : TileLine;
+
+            // -1, чтобы строка не доходила до правого края и консоль не переносила её сама
+            var perRow = Math.Max(1, (Console.WindowWidth - 1) / TileWidth);
+            var lines = 0;
+
+            for (var start = 0; start < tiles.Count; start += perRow)
+            {
+                var end = Math.Min(start + perRow, tiles.Count);
+
+                for (var line = 0; line < 3; line++)
+                {
+                    for (var i = start; i < end; i++)
+                    {
+                        if (i == selected)
+                        {
+                            Console.BackgroundColor = ConsoleColor.Yellow;
+                            Console.ForegroundColor = ConsoleColor.Black;
+                        }
+
+                        Console.Write(tileLine(tiles[i], line));
+                        Console.ResetColor();
+                        Console.Write(' ');
+                    }
+
+                    // Неполный ряд добиваем пробелами, чтобы стереть рамки прошлого кадра
+                    Console.Write(new string(' ', (perRow - (end - start)) * TileWidth));
+                    Console.WriteLine();
+                    lines++;
+                }
+
+                // Маркер только в ряду с выбранной костью; в остальных рядах строка из пробелов
+                var marker = selected >= start && selected < end
+                    ? new string(' ', (selected - start) * TileWidth) + "    ▲"
+                    : "";
+                Console.WriteLine(marker.PadRight(perRow * TileWidth));
+                lines++;
+            }
+
+            return lines;
+        }
+
+        private static string TileLine(ITile tile, int line) => line switch
+        {
+            0 => "┌───┬───┐",
+            1 => $"│ {tile.Top.Value} │ {tile.Bottom.Value} │",
+            _ => "└───┴───┘",
+        };
+
+        private static string HiddenTileLine(ITile tile, int line) => line switch
+        {
+            0 => "┌───┬───┐",
+            1 => "│ ? │ ? │",
+            _ => "└───┴───┘",
+        };
     }
 }
 

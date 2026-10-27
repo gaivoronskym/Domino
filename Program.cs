@@ -125,12 +125,16 @@ namespace Domino
 
         ITile Pop();
 
+        IReadOnlyList<ITile> PopAll();
+
         ITile SelectTile(IUserInterface ui);
     }
 
     public interface IBoard
     {
         bool Started { get; }
+
+        IReadOnlyList<ITile> Tiles { get; }
 
         ITile TopEnd { get; }
 
@@ -160,6 +164,8 @@ namespace Domino
 
         public bool Started => _started;
 
+        public IReadOnlyList<ITile> Tiles => _tiles.AsReadOnly();
+
         public ITile TopEnd => _tiles.First(x => !x.Applied);
 
         public ITile BottomEnd => _tiles.Last(x => !x.Applied);
@@ -172,15 +178,22 @@ namespace Domino
 
         public void Apply(ITile tile)
         {
-            if (!_started)
+            if (!_started) { Start(tile); return; }
+
+            if (TopEnd.Applicable(tile))
             {
-                Start(tile);
-                return;
+                TopEnd.Apply(tile);
+                _tiles.Insert(0, tile);
             }
-            
-            var end = _tiles.First(x => x.Applicable(tile));
-            end.Apply(tile);
-            _tiles.Insert(0, tile);
+            else if (BottomEnd.Applicable(tile))
+            {
+                BottomEnd.Apply(tile);
+                _tiles.Add(tile);
+            }
+            else
+            {
+                throw new InvalidOperationException();
+            }
         }
 
         public bool Applicable(ITile tile)
@@ -224,6 +237,13 @@ namespace Domino
             _tiles.Remove(tile);
 
             return tile;
+        }
+
+        public IReadOnlyList<ITile> PopAll()
+        {
+            var tiles = _tiles.AsReadOnly();
+            _tiles.Clear();
+            return tiles;
         }
 
         public ITile SelectTile(IUserInterface ui)
@@ -375,19 +395,22 @@ namespace Domino
             {
                 while (!_board.Applicable(tile))
                 {
+                    _ui.PrintTile(tile);
+
+                    player.AddTiles([tile]);
+
                     if (_boneyard.Empty)
                     {
                         _ui.Print(new Error($"Куча пуста. Игрок {player.Name} пропускает ход."));
                         return;
                     }
 
-                    _ui.PrintTile(tile);
-
-                    player.AddTiles([tile]);
                     _ui.Print(new Error("Выбранная кость не подходит. Попробуйте ещё раз."));
 
                     tile = _boneyard.SelectTile(_ui);
                 }
+
+                _board.Apply(tile);
             }
             else
             {
@@ -427,10 +450,15 @@ namespace Domino
                 {
                     foreach (var player in _players.Where(x => x.HasTiles))
                     {
-                        _ui.Print(new Info($"Ход игрока {player.Name}"));
+                        _ui.BeginTurn(player.Name, _board);
 
                         var option = MakeDesicion(player);
                         option.Run(player);
+
+                        if(player.TileCount == 0)
+                        {
+                            break;
+                        }
                     }
                 }
                 else
@@ -456,7 +484,12 @@ namespace Domino
 
         private bool CanPlay()
         {
-            return !_boneyard.Empty || _players.Any(p => p.CanPlay(_board));
+            if(_players.Count(x => x.TileCount > 0) == 1)
+            {
+                return false;
+            }
+
+            return !_boneyard.Empty || _players.Count(p => p.CanPlay(_board)) >= 1;
         }
 
         private IGameOption MakeDesicion(Player player)
