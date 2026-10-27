@@ -1,4 +1,7 @@
-﻿namespace Domino
+﻿using System.Numerics;
+using System.Text;
+
+namespace Domino
 {
     public interface ITile
     {
@@ -84,6 +87,11 @@
                 tile.Bottom.Apply();
             }
         }
+
+        public override string ToString()
+        {
+            return $"[{Top.Value}|{Bottom.Value}]";
+        }
     }
 
     public sealed class TileValue : ITileValue
@@ -113,9 +121,11 @@
 
     public interface IBoneyard
     {
-        void AddTiles(IEnumerable<ITile> tiles);
+        bool Empty { get; }
 
         ITile Pop();
+
+        ITile SelectTile(IUserInterface ui);
     }
 
     public interface IBoard
@@ -133,7 +143,7 @@
         bool Applicable(ITile tile);
     }
 
-    public sealed class Board
+    public sealed class Board : IBoard
     {
         private readonly IList<ITile> _tiles;
         private bool _started;
@@ -164,7 +174,8 @@
         {
             if (!_started)
             {
-                throw new InvalidOperationException();
+                Start(tile);
+                return;
             }
             
             var end = _tiles.First(x => x.Applicable(tile));
@@ -174,6 +185,11 @@
 
         public bool Applicable(ITile tile)
         {
+            if (!_started)
+            {
+                return true;
+            }
+
             return TopEnd.Applicable(tile) || BottomEnd.Applicable(tile);
         }
     }
@@ -194,13 +210,7 @@
 
         public bool Has => _tiles.Count > 0;
 
-        public void AddTiles(IEnumerable<ITile> tiles)
-        {
-            foreach (var tile in tiles)
-            {
-                _tiles.Add(tile);
-            }
-        }
+        public bool Empty => _tiles.Count == 0;
 
         public ITile Pop()
         {
@@ -213,6 +223,13 @@
 
             _tiles.Remove(tile);
 
+            return tile;
+        }
+
+        public ITile SelectTile(IUserInterface ui)
+        {
+            var tile = ui.SelectTile(_tiles.AsReadOnly(), true);
+            _tiles.Remove(tile);
             return tile;
         }
     }
@@ -229,6 +246,12 @@
 
         public string Name { get; }
 
+        public bool HasTiles => _tiles.Count > 0;
+
+        public int TileWeight => _tiles.Sum(x => x.Top.Value + x.Bottom.Value);
+
+        public int TileCount => _tiles.Count;
+
         public void AddTiles(IEnumerable<ITile> tiles)
         {
             foreach (var tile in tiles)
@@ -237,7 +260,25 @@
             }
         }
 
-        public bool TryApplyTile(Board board)
+        public void Apply(IBoard board, ITile tile)
+        {
+            if (_tiles.Remove(tile))
+            {
+                board.Apply(tile);
+            }
+        }
+
+        public bool HasApplicableTiles(IBoard board)
+        {
+            return _tiles.Any(board.Applicable);
+        }
+
+        public ITile SelectTile(IUserInterface ui)
+        {
+            return ui.SelectTile(_tiles.AsReadOnly(), false);
+        }
+
+        public bool TryApplyTile(IBoard board)
         {
             var hasApplicable = _tiles.Any(board.Applicable);
 
@@ -252,6 +293,183 @@
 
             return false;
         }
+
+        public bool CanPlay(IBoard board)
+        {
+            if(_tiles.Count == 0)
+            {
+                return false;
+            }
+
+            return HasApplicableTiles(board);
+        }
+
+        public void ClearTiles()
+        {
+            _tiles.Clear();
+        }
+    }
+
+    public interface IGameOption
+    {
+        void Run(Player player);
+    }
+
+    public sealed class PlayerHasTile : IGameOption
+    {
+        private readonly IBoard _board;
+        private readonly IUserInterface _ui;
+
+        public PlayerHasTile(IBoard board, IUserInterface ui)
+        {
+            _board = board;
+            _ui = ui;
+        }
+
+        public void Run(Player player)
+        {
+            var tile = SelectTile(player);
+
+            player.Apply(_board, tile);
+        }
+
+        private ITile SelectTile(Player player)
+        {
+            var tile = player.SelectTile(_ui);
+            while (!_board.Applicable(tile))
+            {
+                _ui.Print(new Error("Выбранная кость не подходит. Попробуйте ещё раз."));
+                tile = player.SelectTile(_ui);
+            }
+
+            return tile;
+        }
+    }
+
+    public sealed class PlayerHasNoTile : IGameOption
+    {
+        private readonly IBoard _board;
+        private readonly IUserInterface _ui;
+        private readonly IBoneyard _boneyard;
+
+        public PlayerHasNoTile(IBoard board, IUserInterface ui, IBoneyard boneyard)
+        {
+            _board = board;
+            _ui = ui;
+            _boneyard = boneyard;
+        }
+
+        public void Run(Player player)
+        {
+            if (_boneyard.Empty)
+            {
+                _ui.Print(new Error($"Куча пуста. Игрок {player.Name} пропускает ход."));
+                return;
+            }
+
+            _ui.Print(new Error($"У игрока {player.Name} нет подходящих костей. Необходимо взять из кучи..."));
+
+            var tile = _boneyard.SelectTile(_ui);
+
+            if (!_board.Applicable(tile))
+            {
+                while (!_board.Applicable(tile))
+                {
+                    if (_boneyard.Empty)
+                    {
+                        _ui.Print(new Error($"Куча пуста. Игрок {player.Name} пропускает ход."));
+                        return;
+                    }
+
+                    _ui.PrintTile(tile);
+
+                    player.AddTiles([tile]);
+                    _ui.Print(new Error("Выбранная кость не подходит. Попробуйте ещё раз."));
+
+                    tile = _boneyard.SelectTile(_ui);
+                }
+            }
+            else
+            {
+                _ui.PrintTile(tile);
+                _board.Apply(tile);
+            }
+
+        }
+    }
+
+    public sealed class Round
+    {
+        private readonly IList<Player> _players;
+        private readonly IUserInterface _ui;
+        private readonly IBoard _board;
+        private readonly IBoneyard _boneyard;
+
+        public Round(IList<Player> players, IUserInterface ui, IBoard board, IBoneyard boneyard)
+        {
+            _players = players;
+            _ui = ui;
+            _board = board;
+            _boneyard = boneyard;
+        }
+
+        public void Run()
+        {
+            while (true)
+            {
+                var winners = _players.Where(x => !x.HasTiles).Select(x => x.Name).ToList();
+                if (winners.Count > 0)
+                {
+                    _ui.Print(new Info($"Победители раунда: {string.Join(',', winners)}"));
+                }
+
+                if (CanPlay())
+                {
+                    foreach (var player in _players.Where(x => x.HasTiles))
+                    {
+                        _ui.Print(new Info($"Ход игрока {player.Name}"));
+
+                        var option = MakeDesicion(player);
+                        option.Run(player);
+                    }
+                }
+                else
+                {
+                    var bestWeight = _players.Min(p => p.TileWeight);
+
+                    var rows = _players
+                        .OrderBy(p => p.TileWeight)
+                        .Select((p, i) => new TableRow(
+                            [(i + 1).ToString(), p.Name, p.TileCount.ToString(), p.TileWeight.ToString()],
+                            Highlight: p.TileWeight == bestWeight))
+                        .ToList();
+
+                    _ui.PrintTable(new Table(
+                        "Раунд окончен. Результаты",
+                        ["Место", "Игрок", "Костей", "Очки"],
+                        rows));
+
+                    return;
+                }
+            }
+        }
+
+        private bool CanPlay()
+        {
+            return !_boneyard.Empty || _players.Any(p => p.CanPlay(_board));
+        }
+
+        private IGameOption MakeDesicion(Player player)
+        {
+            if (player.HasApplicableTiles(_board))
+            {
+                return new PlayerHasTile(_board, _ui);
+            }
+            else
+            {
+                return new PlayerHasNoTile(_board, _ui, _boneyard);
+            }
+        }
     }
 
     public sealed class Game
@@ -259,54 +477,43 @@
         private readonly IList<ITile> _tiles;
         private readonly IList<Player> _players;
         private readonly IUserInterface _ui;
-        private readonly IBoard _board;
-        private readonly IBoneyard _boneyard;
 
         private const int TilesPerPlayer = 7;
 
-        public Game(IList<ITile> tiles, IList<Player> players, IBoard board, IBoneyard boneyard, IUserInterface ui)
+        public Game(IList<ITile> tiles, IList<Player> players, IUserInterface ui)
         {
             _tiles = tiles;
             _players = players;
             _ui = ui;
-            _board = board;
-            _boneyard = boneyard;
         }
 
-        public void ShaffleTiles()
+        public void Play()
         {
-            if(_players.Count > 4)
+            if (_players.Count > 4)
             {
                 throw new InvalidOperationException();
             }
 
-            Random.Shared.Shuffle(_tiles.ToArray());
+            var tiles = _tiles.ToArray();
+            Random.Shared.Shuffle(tiles);
 
             var page = 0;
 
             foreach (var player in _players)
             {
-                player.AddTiles(_tiles.Skip(page * TilesPerPlayer).Take(TilesPerPlayer));
+                player.AddTiles(tiles.Skip(page * TilesPerPlayer).Take(TilesPerPlayer));
+                page++;
             }
 
-            _boneyard.AddTiles(_tiles.Skip(page * TilesPerPlayer));
-        }
+            var round = new Round(_players, _ui, new Board(), new Boneyard(tiles.Skip(page * TilesPerPlayer).ToList()));
 
-        public void Play()
-        {
-            var currentPlayer = 0;
+            round.Run();
 
-            while (true)
+            foreach (var player in _players)
             {
-                var player = _players[currentPlayer];
-                _ui.Print($"Ход игрока {player.Name}");
+                player.ClearTiles();
             }
         }
-    }
-
-    public interface IUserInterface
-    {
-        void Print(string message);
     }
 
     internal class Program
@@ -349,6 +556,17 @@
 
                 new Tile(6, 6)
             ];
+
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.InputEncoding = Encoding.UTF8;
+
+            var game = new Game(
+                tiles.ToList(),
+                [new Player("Ваня"), new Player("Миша")],
+                new ConsoleInterface()
+            );
+
+            game.Play();
         }
     }
 }
